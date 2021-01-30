@@ -1,0 +1,18 @@
+Game
+   A game is something like tictactoe. Players interact with each other and the game.
+
+GameState
+   This records the current state of a game. It might include the position of pieces, the amount of money each player has, etc.
+
+Player
+    An entity which decides which moves to take in the game. A player consists of a set of algorithms for choosing moves at each decision point.
+
+Move
+    An action taken at a decision point.
+    
+
+DecisionPoint
+    A point in the game where a player must make a decision. A game might have a single type of decision point (e.g. in tic tac toe the only decision to make is where to place your mark). A game might have multiple sets of decision points (e.g. in Catan, the player decides where/if to build a road and what resource trade to offer.) Each decision point requires a different picking model.
+
+
+

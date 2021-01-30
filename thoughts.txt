@@ -1,0 +1,7 @@
+How do you deal with unknown or partially known information?
+    1) Something no player can know: what card is on top of a deck
+    2) Something some players know: What card is in player A's hand
+    3) Something a player could know if they had a good memory: What are all the cards in player A's deck
+
+    Perhaps a function which takes in a GameState and player number and returns only the information that player knows.
+

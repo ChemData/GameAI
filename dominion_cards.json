@@ -1,0 +1,81 @@
+{
+    "copper": {
+        "name": "copper",
+        "cost": 0,
+        "value": 1,
+        "types": ["coin"],
+        "game_amount": 60,
+        "initial_deck": 7
+    },
+    "silver": {
+        "name": "silver",
+        "cost": 3,
+        "value": 2,
+        "types": ["coin"],
+        "game_amount": 40
+    },
+    "gold": {
+        "name": "gold",
+        "cost": 6,
+        "value": 3,
+        "types": ["coin"],
+        "game_amount": 30
+    },
+    "estate": {
+        "name": "estate",
+        "vps": 1,
+        "cost": 2,
+        "types": ["victory"],
+        "game_amount":8,
+        "initial_deck": 3
+    },
+    "duchy": {
+        "name": "duchy",
+        "vps": 3,
+        "cost": 5,
+        "types": ["victory"],
+        "game_amount":8
+    },
+    "province": {
+        "name": "province",
+        "vps": 6,
+        "cost": 8,
+        "types": ["victory"],
+        "game_amount":8
+    },
+    "village": {
+        "name": "village",
+        "types": ["action"],
+        "cost": 3,
+        "actions": 2,
+        "draws": 1
+    },
+    "chapel": {
+        "name": "chapel",
+        "types": ["action"],
+        "cost": 2,
+        "special": ["chapeldiscard"]
+    },
+    "militia": {
+        "name": "militia",
+        "types": ["action", "attack"],
+        "cost": 4,
+        "value": 2,
+        "special": ["militiaattack"]
+    },
+    "smithy": {
+        "name": "smithy",
+        "types": ["action"],
+        "cost": 4,
+        "draws": 3
+    },
+    "market": {
+        "name": "market",
+        "types": ["action"],
+        "cost": 5,
+        "draws": 1,
+        "actions": 1,
+        "buys": 1,
+        "value": 1
+    }
+}
