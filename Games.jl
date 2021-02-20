@@ -1,12 +1,13 @@
 
 abstract type Player end
 abstract type GameState end
+abstract type GameOptions end
 abstract type Move end
 abstract type Tile end
 abstract type Card end
 
 struct InvalidMove <: Exception
-    msg::AbstractString
+    msg::String
 end
 
 mutable struct SearchNode
@@ -29,8 +30,8 @@ function Base.show(io::IO, node::SearchNode)
     print(io, "SearchNode($(node.N))")
 end
 
-function newnode(policymodel, gamestate::GameState, parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing)
-    ν, ps = policymodel(decisioninput(gamestate))[1]
+function newnode(policymodels::Dict, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing)
+    ν, ps = policymodels[gamestate.phase](decisioninput(gamestate))[1]
     moves, legalmoves = listofmoves(gamestate)
     winner = winnerof(gamestate)
     if winner == gamestate.current_player
@@ -72,7 +73,7 @@ function explorationvalues(from::SearchNode, c_puct::Real)
 end
 
 "Explore to a leaf node from a given node."
-function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodel)
+function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::Dict)
     for i in 1:number
         currentnode = from
         while true
@@ -84,7 +85,7 @@ function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodel)
             index = findmax(explorationvalues(currentnode, c_puct))[2]
             if typeof(currentnode.children[index]) == Nothing
                 gamestate = executemove(currentnode.gamestate, currentnode.moves[index])
-                child = newnode(policymodel, gamestate, currentnode, index)
+                child = newnode(policymodels, gamestate; parent=currentnode, positionindex=index)
                 currentnode.children[index] = child
                 backup(child, child.ν, child.gamestate.current_player)
                 break
@@ -138,12 +139,12 @@ end
 "Take a specific move and then return the new head node.
 Keeps all the children nodes of the new head but discards the rest of the tree.
 If the new head was not a child of the previous head, will create a completely new node."
-function takemoveandcleantree!(from::SearchNode, moveindex::Int; newgamestate::Union{GameState, Nothing}=nothing, policymodel=nothing, resethead::Bool=false)
+function takemoveandcleantree!(from::SearchNode, moveindex::Int; newgamestate::Union{GameState, Nothing}=nothing, policymodels::Union{Dict, Nothing}=nothing, resethead::Bool=false)
     if from.children[moveindex] === nothing
-        if (newgamestate === nothing) & (policymodel === nothing)
+        if (newgamestate === nothing) & (policymodels === nothing)
             throw(MissingChild("That move cannot be taken because the child does not exist. If you provide the new gamestate and policymodel, this would be OK."))
         end
-        return newnode(policymodel, newgamestate)
+        return newnode(policymodels, newgamestate)
     else
         newhead = from.children[moveindex]
         newhead.ishead = true
@@ -154,7 +155,7 @@ function takemoveandcleantree!(from::SearchNode, moveindex::Int; newgamestate::U
     end
 end
 
-function playgame(game::GameState, players::Array{P}; display::Bool=true) where {P<:Player}
+function playgame(game::GameState, players::Array{P, 1}; display::Bool=true) where {P<:Player}
     if display
         displayboard(game)
     end

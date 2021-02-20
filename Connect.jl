@@ -21,9 +21,14 @@ struct C4Move <: Move
     player::Int
 end
 
-struct C4Game <: GameState
-    board::Array{Int, 2}
+struct C4GameOptions <: GameOptions
+    phases::Tuple{Vararg{String}}
     winninglength::Int
+end
+
+struct C4Game <: GameState
+    options::C4GameOptions
+    board::Array{Int, 2}
     playersymbols::Array{String, 1}
     current_player::Int
     phase::String
@@ -36,10 +41,10 @@ struct C4Human <: Player
 end
 
  mutable struct C4NN <: Player
-    model::Union{Chain, Function}
+    models::Dict{String, Union{Chain, Function}}
+    headnode::SearchNode
     c_puct::Float64
     lookaheads::Int
-    headnode::SearchNode
     temperature::Real
 end
 
@@ -75,12 +80,12 @@ end
 
 "Have a Neural Network AI select a move."
 function pickmove(gamestate::C4Game, player::C4NN)
-    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.model)
+    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models)
     return bestmove(player.headnode, player.temperature)
 end
 
 function updategamestate!(game::GameState, moveindex::Int, player::C4NN)
-    player.headnode = takemoveandcleantree!(player.headnode, moveindex, game, player.model, resethead=true)
+    player.headnode = takemoveandcleantree!(player.headnode, moveindex; newgamestate=game, policymodels=player.models, resethead=true)
 end
 
 function executemove(gamestate::C4Game, move::C4Move)
@@ -115,8 +120,8 @@ end
 "Change the active player in the game to a specific player."
 function setplayer(gamestate::C4Game, newplayer::Int)
     return C4Game(
+        gamestate.options,
         deepcopy(gamestate.board),
-        gamestate.winninglength,
         gamestate.playersymbols,
         newplayer,
         gamestate.phase
@@ -126,8 +131,8 @@ end
 "Change the board in the game to a specific board."
 function setboard(gamestate::C4Game, newboard::Array)
     return C4Game(
+        gamestate.gameoptions,
         deepcopy(newboard),
-        gamestate.winninglength,
         gamestate.playersymbols,
         gamestate.current_player,
         gamestate.phase
@@ -155,7 +160,7 @@ end
 "Return the winner (if any) of a game."
 function winnerof(gamestate::C4Game)
     height, width = size(gamestate.board)
-    length = gamestate.winninglength
+    length = gamestate.options.winninglength
     
     # Check the rows
     for rownum in 1:height
@@ -229,7 +234,8 @@ end
 
 "Create a new game of Connect4 with an empty board."
 function emptyboard(height=6, width=7, winninglength=4)
-    return C4Game(zeros(Int, height, width), winninglength, ["X", "O"], 1, "main")
+    options = C4GameOptions(("main", ), winninglength)
+    return C4Game(options, zeros(Int, height, width), ["X", "O"], 1, "main")
 end
 
 "Return input arrays for the decision model."
@@ -237,7 +243,7 @@ function decisioninput(gamestate::C4Game)
     board = deepcopy(gamestate.board)
     my_spots = (x-> x==gamestate.current_player).(board)
     opponent_spots = (x-> x!=gamestate.current_player && x!=0).(board)
-    return convert(Array{Int}, [flatten(my_spots)..., flatten(opponent_spots)...])
+    return convert(Array{Int}, [Flux.flatten(my_spots)..., Flux.flatten(opponent_spots)...])
 end
 
 function newmodel(hiddenlayersize::Int)
@@ -264,14 +270,6 @@ function naivemodel(numcolumns::Int)
     return modelfunc
 end
 
-
 struct FullColumn <: Exception
     var::String
-end
-
-function testtime()
-    g = emptyboard()
-    players = [C4Random(), C4Random()]
-    @time playgame(g, players, false)
-    @time playgame(g, players, false)
 end
