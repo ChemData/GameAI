@@ -1,0 +1,6 @@
+*.txt
+*.bson
+*.sqlite
+*.hdf5
+*.jld
+playground*.jl
