@@ -14,6 +14,8 @@ trainer = AITrainer("gaa")
 #playtraininggame(player)
 
 
-trainmodelsets(trainer, Dict("main"=>1), 1, 1, .2, 1, 100)
+#trainmodelsets(trainer, Dict("main"=>1), 1, 1, .2, 1, 100)
 
 #runtestgames(trainer, [Dict("main"=>6), Dict("main"=>5)], 500, 1, 100, .6)
+
+runtrainingcycle(trainer, 8)
