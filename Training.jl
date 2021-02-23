@@ -229,9 +229,21 @@ function jointloss(yhat, y)
     return Flux.Losses.mse(yhat[1], y[[1], :]) + Flux.Losses.crossentropy(yhat[2], y[2:end, :])
 end
 
-"Train new ModelSets."
-function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; numberofdatasets::Int, c::Real, learningrate::Real,
-                         momentum::Real, numberofepochs::Int, trainingfraction::Real=0.8)
+"Train new ModelSets.
+
+# Arguments
+- `trainer::AITrainer`: the training process to train the models of.
+- `startingmodels::Dict{String, Int}`: The ids of the models to train.
+- `numberofdatasets::Int`: how many recent datasets to use for training.
+- `learningrate::Real`: The learning rate for the Momentum optimizer.
+- `momentum::Real`: The momentum for the Momentum optimizer.
+- `trainingfraction::Real`: The percentage of the training data to use for training (the residual is used for testing).
+- `savefrequency::Int`: How frequently models should be saved during training. 1 causes models to be saved each epoch. 2 causes them to be stored
+    every other epoch. The model with the best performance on the test set is always saved. 0 causes no models (except the best performing) to be saved.
+
+"
+function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; numberofdatasets::Int, learningrate::Real,
+                         momentum::Real, numberofepochs::Int, trainingfraction::Real=0.8, savefrequency::Real=Inf)
     DBInterface.execute(trainer.db, "SAVEPOINT trainingstart")
     modelsetid = idofmodelset(trainer, startingmodels)
     savedmodelpaths = Array{String, 1}()
@@ -247,6 +259,10 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
         
         sessionstarttime = time()
         sessionstartdate = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
+        savestmt = "
+        INSERT INTO
+            Models (trainingsession, epoch, gamephase, trainingtime, trainingloss, testloss)
+        VALUES (?, ?, ?, ?, ?, ?)"
         for gamephase in keys(modelset)
             println("Training $gamephase Model")
             model = modelset[gamephase]
@@ -257,17 +273,29 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
                 yhat = model(x)[1]
                 return Flux.Losses.mse(yhat[1], y1) + Flux.Losses.crossentropy(yhat[2], y2) + sum(Flux.norm, params(model))
             end
+            
+            bestmodel_results = [sessionid, 0, gamephase, 0, Inf, Inf]
+            bestmodel = model
             for i in 1:numberofepochs
                 modelstarttime = time()
                 Flux.train!(totalloss, params(model), data, Momentum(learningrate, momentum))
                 trainingloss = totalloss(training_data...)
                 testloss = totalloss(test_data...)
                 println("Epoch $i - Training loss: $trainingloss, Test loss: $testloss")
-                sql = "
-                INSERT INTO
-                    Models (trainingsession, epoch, gamephase, trainingtime, trainingloss, testloss)
-                VALUES (?, ?, ?, ?, ?, ?)"
-                query = DBInterface.execute(trainer.db, sql, [sessionid, i, gamephase, time()-modelstarttime, trainingloss, testloss])
+                if (testloss < bestmodel_results[6]) 
+                    bestmodel_results = [sessionid, i, gamephase, time()-modelstarttime, trainingloss, testloss]
+                    bestmodel = deepcopy(model)
+                end
+                if i%savefrequency == 0
+                    query = DBInterface.execute(trainer.db, savestmt, [sessionid, i, gamephase, time()-modelstarttime, trainingloss, testloss])
+                    modelid = DBInterface.lastrowid(query)
+                    savepath = joinpath(trainer.path, "models", "$modelid.bson")
+                    @save savepath model
+                    push!(savedmodelpaths, savepath)
+                end
+            end
+            if bestmodel_results[2]%savefrequency != 0
+                query = DBInterface.execute(trainer.db, savestmt, bestmodel_results)
                 modelid = DBInterface.lastrowid(query)
                 savepath = joinpath(trainer.path, "models", "$modelid.bson")
                 @save savepath model
@@ -536,9 +564,9 @@ function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
     newmodelset = bestmodels(trainer, sessionid=sessionid)
     newmodelsetid = idofmodelset(trainer, newmodelset)
     if length(newmodelset) == 1
-        fe = FormatExpr("\n\tThe best new model is {}. It is part of model set {}")
+        fe = FormatExpr("\n\tThe best new model is {}. It is part of modelset {}")
     else
-        fe = FormatExpr("\n\tThe best new models were {}. They are part of model set {}")
+        fe = FormatExpr("\n\tThe best new models were {}. They are part of modelset {}")
     end
     write(io, format(fe, join(values(newmodelset), ", ", ", and "), newmodelsetid))
 
@@ -547,7 +575,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
     result = runtestgames(trainer, [newmodelset, initialmodelset]; trainer.defaults["runtestgames"]...)
     wins = result[1]/result["total"]*100
     ties = result[0]/result["total"]*100
-    fe = FormatExpr("\n\tModel set {} won {:.1f}% of the time vs modelset {} (and tied {:.1f}% of the time). [{:.2f} minutes]")
+    fe = FormatExpr("\n\tModelset {} won {:.1f}% of the time vs modelset {} (and tied {:.1f}% of the time). [{:.2f} minutes]")
     write(io, format(fe, newmodelsetid, wins, initialid, ties, (time()-start)/60))
 
     #TODO see if the newer set of models is better
