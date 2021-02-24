@@ -129,12 +129,15 @@ function newestdatasets(trainer::AITrainer, number::Int)
 end
 
 "Add a new set of models. This is how to add models directly to the database without having to train them."
-function addnewmodels(trainer::AITrainer, models::Dict{String, T}) where{T <: Any}  
+function addnewmodels(trainer::AITrainer, models::Dict{String, T}) where{T <: Any}
+    modelids = Dict{String, Int}()
     for (gamephase, model) in models
         query = DBInterface.execute(trainer.db, "INSERT INTO Models (gamephase) VALUES (?)", [gamephase])
         newnumber = DBInterface.lastrowid(query)
         @save joinpath(trainer.path, "models", "$newnumber.bson") model
+        modelids[gamephase] = newnumber
     end
+    return modelids
 end
 
 "Return the modelsetid of this set of models if it is already in the table ModelSets. If it is not, add it and return its new id."
@@ -150,9 +153,9 @@ function idofmodelset(trainer::AITrainer, modelset::Dict{String, Int})
         qmark = "(" * join(repeat(["?"], length(modelset)), ", ") * ")"
         stmt = "INSERT INTO ModelSets $columns VALUES $qmark"
         query = DBInterface.execute(trainer.db, stmt, collect(values(modelset)))
-        return DBInterface.lastrowid(query)
+        return Int64(DBInterface.lastrowid(query))
     else
-        return ids[1, "modelsetid"]
+        return Int64(ids[1, "modelsetid"])
     end
 end
 
@@ -240,7 +243,6 @@ end
 - `trainingfraction::Real`: The percentage of the training data to use for training (the residual is used for testing).
 - `savefrequency::Int`: How frequently models should be saved during training. 1 causes models to be saved each epoch. 2 causes them to be stored
     every other epoch. The model with the best performance on the test set is always saved. 0 causes no models (except the best performing) to be saved.
-
 "
 function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; numberofdatasets::Int, learningrate::Real,
                          momentum::Real, numberofepochs::Int, trainingfraction::Real=0.8, savefrequency::Real=Inf)
@@ -264,7 +266,7 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
             Models (trainingsession, epoch, gamephase, trainingtime, trainingloss, testloss)
         VALUES (?, ?, ?, ?, ?, ?)"
         for gamephase in keys(modelset)
-            println("Training $gamephase Model")
+            print("\nTraining $gamephase Model\n")
             model = modelset[gamephase]
             modeldata = data[gamephase]
             training_data, test_data = splitdata((modeldata["x"], modeldata["winprob"], modeldata["moveprob"]), trainingfraction)
@@ -281,7 +283,9 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
                 Flux.train!(totalloss, params(model), data, Momentum(learningrate, momentum))
                 trainingloss = totalloss(training_data...)
                 testloss = totalloss(test_data...)
-                println("Epoch $i - Training loss: $trainingloss, Test loss: $testloss")
+                
+                fe = FormatExpr("\tEpoch {}/{} - Training loss: {:.3f}, Test loss: {:.3f}\r")
+                print(format(fe, i, numberofepochs, trainingloss, testloss))
                 if (testloss < bestmodel_results[6]) 
                     bestmodel_results = [sessionid, i, gamephase, time()-modelstarttime, trainingloss, testloss]
                     bestmodel = deepcopy(model)
@@ -404,8 +408,9 @@ end
 function playtestgames(gamestart::GameState, players::Array{P}, number::Int; logger::Union{Nothing, AbstractLogger}=nothing, randomize::Bool=true) where {P<:Player}
     output = Dict{Any, Int}(i=>0 for i in 0:length(players))
     output["total"] = 0
+    print("\nPlaying Test Games\n")
     for i in 1:number
-        println("Playing game $i")
+        print("\t$i/$number\r")
         game = deepcopy(gamestart)
         newplayers = deepcopy(players)
         playerorder = 1:length(players)
@@ -421,7 +426,7 @@ function playtestgames(gamestart::GameState, players::Array{P}, number::Int; log
             output[winner] += 1
             output["total"] += 1
         catch e
-            println("Failed.")
+            print("Failed.\r")
             if logger !== nothing
                 with_logger(logger) do 
                     @info("\n\nIssue with Test Games", now(), sprint(showerror, e, backtrace()))
@@ -454,8 +459,9 @@ function playtraininggames(player::Player, number::Int, storepath::String; logge
     x = Dict{String, Array}()
     y_winprob = Dict{String, Array}()
     y_moveprob = Dict{String, Array}()
+    print("\nPlaying Training Games\n")
     for i in 1:number
-        println("Game $i/$number")
+        print("\t$i/$number\r")
         newplayer = deepcopy(player)
         try
             winner, newplayer = playtraininggame(newplayer)
@@ -464,7 +470,7 @@ function playtraininggames(player::Player, number::Int, storepath::String; logge
             dictionaryappend!(y_winprob, newy_winprob)
             dictionaryappend!(y_moveprob, newy_moveprob)
         catch e
-            println("Failed.")
+            print("Failed.\r")
             if logger !== nothing
                 with_logger(logger) do 
                     @info("\n\nIssue with Training Games", now(), sprint(showerror, e, backtrace()))
@@ -578,14 +584,43 @@ function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
     fe = FormatExpr("\n\tModelset {} won {:.1f}% of the time vs modelset {} (and tied {:.1f}% of the time). [{:.2f} minutes]")
     write(io, format(fe, newmodelsetid, wins, initialid, ties, (time()-start)/60))
 
-    #TODO see if the newer set of models is better
     close(io)
+    return newmodelsetid, Dict("wins"=>result[1], "loses"=>result["total"]-result[0]-result[1])
 end
 
 "Run a training cycle using the specified already stored, modelset (from modelsetid)."
-function runtrainingcycle(trainer::AITrainer, initialmodelset::Int)
-    modelset = modelsetfromid(trainer, initialmodelset)
-    runtrainingcycle(trainer, modelset)
+function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
+    modelset = modelsetfromid(trainer, initialmodelsetid)
+    return runtrainingcycle(trainer, modelset)
+end
+
+"Run multiple training cycles."
+function runtrainingcycles(trainer::AITrainer, initialmodelset::Int, number::Real)
+    touch(joinpath(trainer.path, "delete_to_stop_training_cycles.txt"))
+    completed = 0
+    modelsettouse = initialmodelset
+    while completed < number
+        newsetid, trainingresults = runtrainingcycle(trainer, modelsettouse)
+        if trainingresults["wins"] >= 1.1*trainingresults["loses"]
+            modelsettouse = newsetid
+        else
+            io = open(joinpath(trainer.path, "trainingcycleoutput.txt"), "a")
+            write(io, "\n\tModel set $newsetid is not significantly better than $modelsettouse so it will not be carried forward.")
+            close(io)
+        end
+
+        if ! ispath(joinpath(trainer.path, "delete_to_stop_training_cycles.txt"))
+            break
+        end
+        completed += 1
+    end
+end
+
+"Run multiple training cycles starting with some newly defined models."
+function runtrainingcycles(trainer::AITrainer, newmodels::Dict{String, T}, number::Real) where {T <: Any}
+    modelset = addnewmodels(trainer, newmodels)
+    modelsetid = Int64(idofmodelset(trainer, modelset))
+    runtrainingcycles(trainer, modelsetid, number)
 end
 
 
