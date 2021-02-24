@@ -6,6 +6,11 @@ include("Training.jl")
 #setupnewtrainer("gaa", C4NN, emptyboard())
 trainer = AITrainer("gaa")
 #models =  Dict("main"=>newmodel(50))
+runtrainingcycles(trainer, 347, 1)
+
+
+
+#models =  Dict("main"=>newmodel(50))
 #addnewmodels(trainer, models)
 #idofmodelset(trainer, Dict("main"=>1))
 #generatetrainingdata(trainer, Dict("main"=> 1), 1000, 1, 100, .8)
@@ -19,4 +24,3 @@ trainer = AITrainer("gaa")
 
 #runtestgames(trainer, [Dict("main"=>6), Dict("main"=>5)], 500, 1, 100, .6)
 
-runtrainingcycle(trainer, 3)
