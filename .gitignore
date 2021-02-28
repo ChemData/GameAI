@@ -1,6 +1,7 @@
 *.txt
 *.bson
 *.sqlite
+*.sqlite-journal
 *.hdf5
 *.jld
 *.json

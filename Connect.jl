@@ -16,6 +16,15 @@ end
 
 Flux.@functor Split
 
+struct Flatten
+end
+
+function (f::Flatten)(x::AbstractArray)
+    Flux.flatten(x)
+end
+
+Flux.@functor Flatten
+
 struct C4Move <: Move
     column::Int
     player::Int
@@ -243,11 +252,13 @@ function decisioninput(gamestate::C4Game)
     board = deepcopy(gamestate.board)
     my_spots = (x-> x==gamestate.current_player).(board)
     opponent_spots = (x-> x!=gamestate.current_player && x!=0).(board)
-    return convert(Array{Int}, [Flux.flatten(my_spots)..., Flux.flatten(opponent_spots)...])
+    output = cat(my_spots, opponent_spots, dims=3)
+    return convert(Array{Int}, reshape(output, (size(output)..., 1)))
 end
 
 function newmodel(hiddenlayersize::Int)
     model = Chain(
+        Flatten(),
         Dense(84, hiddenlayersize),
         Split(
             Dense(hiddenlayersize, 1, NNlib.σ),
