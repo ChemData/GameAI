@@ -79,7 +79,7 @@ function loadcards(cardstoinclude::Array{String})
         cardinfo = parseddata[name]
         cards = cat(cards,
             DominionCard(
-                cardinfo["name"],
+                cardinfo["name"], 
                 get(cardinfo, "cost", 0),
                 get(cardinfo, "value", 0),
                 get(cardinfo, "vps", 0),

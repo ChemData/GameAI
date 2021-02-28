@@ -16,6 +16,7 @@ struct AITrainer
     playertype::DataType
     startstate::GameState
     defaults::Dict
+    modelinputsizes::Dict
 end
 
 AITrainer(path) = AITrainer(
@@ -23,11 +24,12 @@ AITrainer(path) = AITrainer(
     SQLite.DB(joinpath(path, "info.sqlite")),
     JLD.load(joinpath(path, "player.jld"))["playertype"],
     JLD.load(joinpath(path, "startstate.jld"))["startstate"],
-    readparamjson(joinpath(path, "defaults.json"))
+    readparamjson(joinpath(path, "defaults.json")),
+    readjson(joinpath(path, "modelinputsizes.json"))
     )
 
 "Create (if not existing) the folders/sql database to store training information in. Store the Type of Player to use and the starting state for games."
-function setupnewtrainer(path::String, playertype::DataType, startstate::GameState)
+function setupnewtrainer(path::String, playertype::DataType, startstate::GameState, modelinputsizes::Dict{String, A}=Dict()) where{A<:Array}
     mkpath(joinpath(path, "models"))
     mkpath(joinpath(path, "training-data"))
     db = SQLite.DB(joinpath(path, "info.sqlite"))
@@ -120,6 +122,13 @@ function setupnewtrainer(path::String, playertype::DataType, startstate::GameSta
         throw(ArgumentError("a stored startstate already exists there."))
     else
         JLD.save(joinpath(path, "startstate.jld"), "startstate", startstate)
+    end
+    if isfile(joinpath(path, "modelinputsizes.json"))
+        throw(ArgumentError("a stored modelinputsizes already exists there."))
+    else
+        open(joinpath(path, "modelinputsizes.json"), "w") do f
+            JSON.print(f, modelinputsizes)
+        end
     end
 end
 
@@ -269,6 +278,13 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
             print("\nTraining $gamephase Model\n")
             model = modelset[gamephase]
             modeldata = data[gamephase]
+            try
+                modeldata["x"] = reshape(modeldata["x"], trainer.modelinputsizes[gamephase]..., :)
+            catch e
+                if !isa(e, KeyError)
+                    rethrow(e)
+                end
+            end
             training_data, test_data = splitdata((modeldata["x"], modeldata["winprob"], modeldata["moveprob"]), trainingfraction)
             data = Flux.Data.DataLoader(training_data..., batchsize=size(training_data[1])[2])
             function totalloss(x, y1, y2)
@@ -334,10 +350,15 @@ function splitdata(data, training_fraction)
     training = []
     test = []
     for dataset in data
-        push!(training, dataset[:, order[1:trainingnumber]])
-        push!(test, dataset[:, order[trainingnumber:end]]) 
+        push!(training, slicealonglastaxis(dataset, order[1:trainingnumber]))
+        push!(test, slicealonglastaxis(dataset, order[trainingnumber:end]))
     end
     return training, test
+end
+
+"Return a slice of an array "
+function slicealonglastaxis(A::AbstractArray, inds)
+    return A[Tuple(axes(A, n) for n in 1:(ndims(A)- 1))..., inds]
 end
 
 "Return the ids of the model which performed best on the test set."
@@ -529,8 +550,9 @@ function nodetrainingdata(node::SearchNode, winner::Int, temperature::Real)
     else
         winprob = 1
     end
-    y_winprob = Dict(node.gamestate.phase => [winprob])
-    y_moveprob = Dict(node.gamestate.phase => moveprobabilities(node, temperature))
+    y_winprob = Dict(node.gamestate.phase => reshape([winprob], 1, 1))
+    moveprobs = moveprobabilities(node, temperature)
+    y_moveprob = Dict(node.gamestate.phase => reshape(moveprobs, length(moveprobs), 1))
     return x, y_winprob, y_moveprob
 end
 
@@ -633,7 +655,7 @@ function dictionaryappend!(appendto::Dict{String, A}, appendfrom::Dict{String, B
         if ! haskey(appendto, dictname)
             appendto[dictname] = deepcopy(appendfrom[dictname])
         else
-            appendto[dictname] = hcat(appendto[dictname], appendfrom[dictname])
+            appendto[dictname] = cat(appendto[dictname], appendfrom[dictname], dims=length(size(appendto[dictname])))
         end
     end
 end
@@ -649,6 +671,14 @@ function readparamjson(path::String)
         return output
     end
 end
+
+"Return the parsed contents of a json file."
+function readjson(path::String)
+    open(path, "r") do f
+        return JSON.parse(String(read(f)))
+    end
+end
+
 
 struct WrongPhase <: Exception
     var::String

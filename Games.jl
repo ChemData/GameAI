@@ -32,6 +32,8 @@ end
 
 function newnode(policymodels::Dict, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing)
     ν, ps = policymodels[gamestate.phase](decisioninput(gamestate))[1]
+    ν = ν[1]
+    ps = reshape(ps, length(ps))
     moves, legalmoves = listofmoves(gamestate)
     winner = winnerof(gamestate)
     if winner == gamestate.current_player

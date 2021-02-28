@@ -2,25 +2,10 @@ using HDF5
 include("Connect.jl")
 include("Training.jl")
 
-
-#setupnewtrainer("gaa", C4NN, emptyboard())
-trainer = AITrainer("gaa")
-#models =  Dict("main"=>newmodel(50))
-runtrainingcycles(trainer, 347, 1)
-
-
-
+path = "C:/Users/Daniel/documents/juliaprojects/connectexperiments/thickmodel"
+#setupnewtrainer(path, C4NN, emptyboard(), Dict("main"=>[84]))
+trainer = AITrainer(path)
 #models =  Dict("main"=>newmodel(50))
 #addnewmodels(trainer, models)
 #idofmodelset(trainer, Dict("main"=>1))
-#generatetrainingdata(trainer, Dict("main"=> 1), 1000, 1, 100, .8)
-
-#models = loadmodelset(trainer, Dict("main"=>1))
-#player = C4NN(models, newnode(models, emptyboard()), 1, 100, .8)
-#playtraininggame(player)
-
-
-#trainmodelsets(trainer, Dict("main"=>1), 1, 1, .2, 1, 100)
-
-#runtestgames(trainer, [Dict("main"=>6), Dict("main"=>5)], 500, 1, 100, .6)
-
+runtrainingcycles(trainer, 1, Inf)
