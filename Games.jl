@@ -30,8 +30,12 @@ function Base.show(io::IO, node::SearchNode)
     print(io, "SearchNode($(node.N))")
 end
 
-function newnode(policymodels::Dict, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing)
-    ν, ps = policymodels[gamestate.phase](decisioninput(gamestate))[1]
+function newnode(policymodels::Dict, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing, inputreshape::Dict=Dict())
+    inputdata = decisioninput(gamestate)
+    if haskey(inputreshape, gamestate.phase)
+        inputdata = reshape(inputdata, inputreshape[gamestate.phase]..., :)
+    end
+    ν, ps = policymodels[gamestate.phase](inputdata)[1]
     ν = ν[1]
     ps = reshape(ps, length(ps))
     moves, legalmoves = listofmoves(gamestate)
@@ -75,7 +79,7 @@ function explorationvalues(from::SearchNode, c_puct::Real)
 end
 
 "Explore to a leaf node from a given node."
-function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::Dict)
+function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::Dict, inputreshape::Dict=Dict())
     for i in 1:number
         currentnode = from
         while true
@@ -87,7 +91,7 @@ function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::
             index = findmax(explorationvalues(currentnode, c_puct))[2]
             if typeof(currentnode.children[index]) == Nothing
                 gamestate = executemove(currentnode.gamestate, currentnode.moves[index])
-                child = newnode(policymodels, gamestate; parent=currentnode, positionindex=index)
+                child = newnode(policymodels, gamestate; parent=currentnode, positionindex=index, inputreshape=inputreshape)
                 currentnode.children[index] = child
                 backup(child, child.ν, child.gamestate.current_player)
                 break

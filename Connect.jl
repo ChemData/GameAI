@@ -1,29 +1,8 @@
 using LinearAlgebra
 using Flux
+include("FluxExtension.jl")
 include("Games.jl")
 
-struct Split 
-    fs
-end
-
-function Split(fs...)
-    Split(fs)
-end
-
-function (w::Split)(x::AbstractArray)
-    tuple([w.fs[i](x) for i in 1:length(w.fs)])
-end
-
-Flux.@functor Split
-
-struct Flatten
-end
-
-function (f::Flatten)(x::AbstractArray)
-    Flux.flatten(x)
-end
-
-Flux.@functor Flatten
 
 struct C4Move <: Move
     column::Int
@@ -51,6 +30,7 @@ end
 
  mutable struct C4NN <: Player
     models::Dict{String, Union{Chain, Function}}
+    inputshapes::Dict{String, Tuple{Vararg{Int32, N} where N}}
     headnode::SearchNode
     c_puct::Float64
     lookaheads::Int
@@ -89,7 +69,7 @@ end
 
 "Have a Neural Network AI select a move."
 function pickmove(gamestate::C4Game, player::C4NN)
-    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models)
+    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models, player.inputshapes)
     return bestmove(player.headnode, player.temperature)
 end
 
@@ -258,7 +238,6 @@ end
 
 function newmodel(hiddenlayersize::Int)
     model = Chain(
-        Flatten(),
         Dense(84, hiddenlayersize),
         Split(
             Dense(hiddenlayersize, 1, NNlib.σ),
@@ -268,7 +247,7 @@ function newmodel(hiddenlayersize::Int)
             )
         )
     )
-    return model
+    return model, (84,)
 end
 
 function naivemodel(numcolumns::Int)
