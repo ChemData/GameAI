@@ -25,11 +25,11 @@ AITrainer(path) = AITrainer(
     JLD.load(joinpath(path, "player.jld"))["playertype"],
     JLD.load(joinpath(path, "startstate.jld"))["startstate"],
     readparamjson(joinpath(path, "defaults.json")),
-    readjson(joinpath(path, "modelinputsizes.json"))
+    readinputsizejson(joinpath(path, "modelinputsizes.json"))
     )
 
 "Create (if not existing) the folders/sql database to store training information in. Store the Type of Player to use and the starting state for games."
-function setupnewtrainer(path::String, playertype::DataType, startstate::GameState, modelinputsizes::Dict{String, A}=Dict()) where{A<:Array}
+function setupnewtrainer(path::String, playertype::DataType, startstate::GameState, modelinputsizes::Dict{String, A}=Dict()) where{A<:Tuple}
     mkpath(joinpath(path, "models"))
     mkpath(joinpath(path, "training-data"))
     db = SQLite.DB(joinpath(path, "info.sqlite"))
@@ -137,25 +137,65 @@ function newestdatasets(trainer::AITrainer, number::Int)
     sql = "SELECT dataid FROM DataSets OREDER BY creationdate DESC LIMIT $number"
 end
 
+"Add a new model. This a how to add an untrained model."
+function addnewmodel(trainer::AITrainer, model, gamephase::String)
+    if ! (gamephase in trainer.startstate.options.phases)
+        throw(InvalidPhase("$gamephase is not a phase of this game."))
+    end
+    query = DBInterface.execute(trainer.db, "INSERT INTO Models (gamephase) VALUES (?);", [gamephase])
+    newid = DBInterface.lastrowid(query)
+    @save joinpath(trainer.path, "models", "$newid.bson") model
+    return newid
+end
+
 "Add a new set of models. This is how to add models directly to the database without having to train them."
-function addnewmodels(trainer::AITrainer, models::Dict{String, T}) where{T <: Any}
-    modelids = Dict{String, Int}()
+function addnewmodels(trainer::AITrainer, models)
+    modelids = []
     for (gamephase, model) in models
-        query = DBInterface.execute(trainer.db, "INSERT INTO Models (gamephase) VALUES (?)", [gamephase])
-        newnumber = DBInterface.lastrowid(query)
-        @save joinpath(trainer.path, "models", "$newnumber.bson") model
-        modelids[gamephase] = newnumber
+        newid = addnewmodel(trainer, model, gamephase)
+        push!(modelids, newid)
     end
     return modelids
 end
 
-"Return the modelsetid of this set of models if it is already in the table ModelSets. If it is not, add it and return its new id."
-function idofmodelset(trainer::AITrainer, modelset::Dict{String, Int})
+"Create a modelset from stored models if the modelset does not already exist.
+
+Return the id of the new modelset (or of the already existing one).
+
+Will check to ensure that the modelset has exactly one model for each phase and that models with those ids exist."
+function createmodelset(trainer::AITrainer, modelids::Array{Int})
+    remainingphases = Set(trainer.startstate.options.phases)
+    allphases = deepcopy(remainingphases)
+    modelset = Dict{String, Int}()
+    for modelid in modelids
+        stmt = "SELECT modelid, gamephase FROM MODELS where modelid=?;"
+        result = DataFrame(DBInterface.execute(trainer.db, stmt, [modelid]))
+        if size(result)[1] == 0
+            throw(InvalidID("there is no stored model with id $modelid."))
+        end
+        phase = result[1, "gamephase"]
+        modelset[phase] = modelid
+        if ! (phase in allphases)
+            throw(InvalidPhase("$phase is not a phase of this game."))
+        else
+            if ! (phase in remainingphases)
+                throw(RepeatedPhase("you cannot add multiple models for the same phase, $phase, to a modelset."))
+            end
+        end
+        symdiff!(remainingphases, [phase])
+    end
+    if length(remainingphases) > 0
+        throw(MissingPhase("the model set must contain models for the phase(s): $(join(remainingphases, ", "))."))
+    end
+
+    # Add this modelset if it doesn't exist yet, then return the id of the modelset
+
     stmt = "SELECT modelsetid FROM ModelSets WHERE"
     for phase in keys(modelset)
         stmt *= " $phase = ? AND"
     end
     stmt = stmt[1:end-4]
+
     ids = DataFrame(DBInterface.execute(trainer.db, stmt, collect(values(modelset))))
     if size(ids)[1] == 0
         columns = "(" * join(collect(keys(modelset)), ", ") * ")"
@@ -167,7 +207,7 @@ function idofmodelset(trainer::AITrainer, modelset::Dict{String, Int})
         return Int64(ids[1, "modelsetid"])
     end
 end
-
+    
 "Return the modelset of this id."
 function modelsetfromid(trainer::AITrainer, modelsetid::Int)
     stmt = "SELECT * FROM ModelSets WHERE modelsetid=?;"
@@ -182,11 +222,10 @@ function modelsetfromid(trainer::AITrainer, modelsetid::Int)
 end
 
 "Generate training data and save it."
-function generatetrainingdata(trainer::AITrainer, modelids::Dict{String, Int}; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
-    modelsetid = idofmodelset(trainer, modelids)
-    models = loadmodelset(trainer, modelids)
-    headnode = newnode(models, deepcopy(trainer.startstate))
-    player = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
+function generatetrainingdata(trainer::AITrainer, modelsetid::Int; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
+    models = loadmodelset(trainer, modelsetid)
+    headnode = newnode(models, deepcopy(trainer.startstate); inputreshape=trainer.modelinputsizes)
+    player = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
     newid = columnmax(trainer.db, "TrainingData", "dataid", 0) + 1
     starttime = time()
     io = open(joinpath(trainer.path, "errorlog.txt"), "a+")
@@ -201,10 +240,10 @@ end
 "Load and return a set of models. The keys of `model` are the names of game phases. The values are modelids of the models.
 This will check that the phase of the loaded model matches the phase stated in `models`.
 "
-function loadmodelset(trainer::AITrainer, models::Dict{String, Int})
+function loadmodelset(trainer::AITrainer, modelset::Dict{String, Int})
     output = Dict()
-    for phase in keys(models)
-        modelid = models[phase]
+    for phase in keys(modelset)
+        modelid = modelset[phase]
         @load joinpath(trainer.path, "models", "$modelid.bson") model
         storedphase = DataFrame(DBInterface.execute(trainer.db, "SELECT gamephase FROM Models WHERE modelid == ?", [modelid]))[1, "gamephase"]
         if storedphase != phase
@@ -213,6 +252,11 @@ function loadmodelset(trainer::AITrainer, models::Dict{String, Int})
         output[phase] = model
     end
     return output
+end
+
+function loadmodelset(trainer::AITrainer, modelsetid::Int)
+    modelset = modelsetfromid(trainer, modelsetid)
+    return loadmodelset(trainer, modelset)
 end
 
 "Load and return training data."
@@ -253,13 +297,13 @@ end
 - `savefrequency::Int`: How frequently models should be saved during training. 1 causes models to be saved each epoch. 2 causes them to be stored
     every other epoch. The model with the best performance on the test set is always saved. 0 causes no models (except the best performing) to be saved.
 "
-function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; numberofdatasets::Int, learningrate::Real,
+function trainmodelsets(trainer::AITrainer, startingmodelsetid::Int; numberofdatasets::Int, learningrate::Real,
                          momentum::Real, numberofepochs::Int, trainingfraction::Real=0.8, savefrequency::Real=Inf)
     DBInterface.execute(trainer.db, "SAVEPOINT trainingstart")
-    modelsetid = idofmodelset(trainer, startingmodels)
+    modelsetid = startingmodelsetid
     savedmodelpaths = Array{String, 1}()
     sessionid = columnmax(trainer.db, "TrainingSessions", "sessionid",  0) + 1
-    modelset = loadmodelset(trainer, startingmodels)
+    modelset = loadmodelset(trainer, startingmodelsetid)
     dataids = DataFrame(DBInterface.execute(trainer.db, "SELECT dataid FROM TrainingData ORDER BY creationdate desc LIMIT ?", [numberofdatasets]))[!, "dataid"]
     try
         for dataid in dataids
@@ -325,7 +369,7 @@ function trainmodelsets(trainer::AITrainer, startingmodels::Dict{String, Int}; n
         sql = "
         INSERT INTO 
             TrainingSessions (sessionid, startingmodels, startdate, totaltrainingtime, numberofdatasets, numberofepochs, learningrate, momentum, trainingfraction)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);" # if you can start with any set of models, how do you store that information???
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);"
         DBInterface.execute(
             trainer.db, sql, 
             [sessionid, modelsetid, sessionstartdate, time()-sessionstarttime, numberofdatasets,
@@ -362,7 +406,7 @@ function slicealonglastaxis(A::AbstractArray, inds)
 end
 
 "Return the ids of the model which performed best on the test set."
-function bestmodels(trainer::AITrainer, phases::String; sessionid::Union{Int, Nothing}=nothing)
+function bestmodel(trainer::AITrainer, phase::String; sessionid::Union{Int, Nothing}=nothing)
     if sessionid === nothing
         stmt = "
         SELECT 
@@ -371,7 +415,7 @@ function bestmodels(trainer::AITrainer, phases::String; sessionid::Union{Int, No
             Models 
         WHERE 
             gamephase = ? AND trainingloss = (SELECT MIN(trainingloss) FROM Models);"
-        modelid = DataFrame(DBInterface.execute(trainer.db, stmt, [phases]))
+        modelid = DataFrame(DBInterface.execute(trainer.db, stmt, [phase]))
     else
         stmt = "
         SELECT 
@@ -380,7 +424,7 @@ function bestmodels(trainer::AITrainer, phases::String; sessionid::Union{Int, No
             Models 
         WHERE 
             gamephase = ? AND trainingloss = (SELECT MIN(trainingloss) FROM Models WHERE trainingsession=?) AND trainingsession = ?;"
-        modelid = DataFrame(DBInterface.execute(trainer.db, stmt, [phases, sessionid, sessionid]))
+        modelid = DataFrame(DBInterface.execute(trainer.db, stmt, [phase, sessionid, sessionid]))
     end
     
     return modelid[1, "modelid"]
@@ -388,7 +432,7 @@ end
 
 "Returm the ids of the models for multiple phases which performed best on the test sets."
 function bestmodels(trainer::AITrainer, phases::Array{String, 1}; sessionid::Union{Int, Nothing}=nothing)
-    return Dict((phase=>bestmodels(trainer, phase; sessionid=sessionid)) for phase in phases)
+    return Dict((phase=>bestmodel(trainer, phase; sessionid=sessionid)) for phase in phases)
 end
 
 "Return the ids of models for each phase which performed best on the test sets."
@@ -397,12 +441,10 @@ function bestmodels(trainer::AITrainer; sessionid::Union{Int, Nothing}=nothing)
 end
 
 "Play some test games."
-function runtestgames(trainer::AITrainer, playersmodels::Array{Dict{String, Int}, 1}; numberofgames::Int, c_puct::Real, lookaheads::Int, temperature::Real)
+function runtestgames(trainer::AITrainer, playersmodelsets::Array{Int, 1}; numberofgames::Int, c_puct::Real, lookaheads::Int, temperature::Real)
     players = Array{trainer.playertype, 1}()
-    setids = []
-    for modelids in playersmodels
-        push!(setids, idofmodelset(trainer, modelids))
-        models = loadmodelset(trainer, modelids)
+    for modelsetid in playersmodelsets
+        models = loadmodelset(trainer, modelsetid)
         headnode = newnode(models, deepcopy(trainer.startstate))
         newplayer = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
         push!(players, newplayer)
@@ -418,7 +460,7 @@ function runtestgames(trainer::AITrainer, playersmodels::Array{Dict{String, Int}
     stmt = "INSERT INTO TestGames (testdate, time, numberofgames) VALUES (?, ?, ?);"
     query = DBInterface.execute(trainer.db, stmt, [Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), time()-starttime, winners["total"]])
     testgameid = DBInterface.lastrowid(query)
-    for (playernumber, setid) in enumerate(setids)
+    for (playernumber, setid) in enumerate(playersmodelsets)
         stmt = "INSERT INTO TestGamePlayers (gameset, player, winfraction, tiefraction) VALUES (?, ?, ?, ?);"
         DBInterface.execute(trainer.db, stmt, [testgameid, setid, winners[playernumber]/winners["total"], winners[0]/winners["total"]])
     end
@@ -512,7 +554,7 @@ end
 "Play a traininggame in which a single AI takes all the moves."
 function playtraininggame(player::Player)
     while true
-        explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models)
+        explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models, player.inputshapes)
         _, moveindex = bestmove(player.headnode, player.temperature)
         player.headnode = takemoveandcleantree!(player.headnode, moveindex, resethead=false)
         winner = winnerof(player.headnode.gamestate)
@@ -566,21 +608,21 @@ A training cycle consists of these phases
 """
 
 "Run a training cycle using the specified, already stored, models."
-function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
+function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     io = open(joinpath(trainer.path, "trainingcycleoutput.txt"), "a")
     date = Dates.format(Dates.now(), "yyyy-mm-dd HH:MM")
     write(io, "\n[$date]")
     
     # Generate new training data
-    initialid = idofmodelset(trainer, initialmodelset)
+    initialmodelset = modelsetfromid(trainer, initialmodelsetid)
     start = time()
-    generatetrainingdata(trainer, initialmodelset; trainer.defaults["generatetrainingdata"]...)
+    generatetrainingdata(trainer, initialmodelsetid; trainer.defaults["generatetrainingdata"]...)
     fe = FormatExpr("\n\tGenerated training data from modelset {}. [{:.2f} minutes]")
-    write(io, format(fe, initialid, (time()-start)/60))
+    write(io, format(fe, initialmodelsetid, (time()-start)/60))
     
     # Train the models
     start = time()
-    sessionid = trainmodelsets(trainer, initialmodelset; trainer.defaults["trainmodelsets"]...)
+    sessionid = trainmodelsets(trainer, initialmodelsetid; trainer.defaults["trainmodelsets"]...)
     if length(initialmodelset) == 1
         fe = FormatExpr("\n\tTrained model {}. [{:.2f} minutes]")
     else
@@ -590,7 +632,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
 
     # Identify the best new models
     newmodelset = bestmodels(trainer, sessionid=sessionid)
-    newmodelsetid = idofmodelset(trainer, newmodelset)
+    newmodelsetid = createmodelset(trainer, collect(values(newmodelset)))
     if length(newmodelset) == 1
         fe = FormatExpr("\n\tThe best new model is {}. It is part of modelset {}")
     else
@@ -600,34 +642,28 @@ function runtrainingcycle(trainer::AITrainer, initialmodelset::Dict)
 
     # Play test games between the old and new model set
     start = time()
-    result = runtestgames(trainer, [newmodelset, initialmodelset]; trainer.defaults["runtestgames"]...)
+    result = runtestgames(trainer, [newmodelsetid, initialmodelsetid]; trainer.defaults["runtestgames"]...)
     wins = result[1]/result["total"]*100
     ties = result[0]/result["total"]*100
     fe = FormatExpr("\n\tModelset {} won {:.1f}% of the time vs modelset {} (and tied {:.1f}% of the time). [{:.2f} minutes]")
-    write(io, format(fe, newmodelsetid, wins, initialid, ties, (time()-start)/60))
+    write(io, format(fe, newmodelsetid, wins, initialmodelsetid, ties, (time()-start)/60))
 
     close(io)
     return newmodelsetid, Dict("wins"=>result[1], "loses"=>result["total"]-result[0]-result[1])
 end
 
-"Run a training cycle using the specified already stored, modelset (from modelsetid)."
-function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
-    modelset = modelsetfromid(trainer, initialmodelsetid)
-    return runtrainingcycle(trainer, modelset)
-end
-
 "Run multiple training cycles."
-function runtrainingcycles(trainer::AITrainer, initialmodelset::Int, number::Real)
+function runtrainingcycles(trainer::AITrainer, initialmodelsetid::Int, number::Real)
     touch(joinpath(trainer.path, "delete_to_stop_training_cycles.txt"))
     completed = 0
-    modelsettouse = initialmodelset
+    modelsettouseid = initialmodelsetid
     while completed < number
-        newsetid, trainingresults = runtrainingcycle(trainer, modelsettouse)
+        newsetid, trainingresults = runtrainingcycle(trainer, modelsettouseid)
         if trainingresults["wins"] >= 1.1*trainingresults["loses"]
-            modelsettouse = newsetid
+            modelsettouseid = newsetid
         else
             io = open(joinpath(trainer.path, "trainingcycleoutput.txt"), "a")
-            write(io, "\n\tModel set $newsetid is not significantly better than $modelsettouse so it will not be carried forward.")
+            write(io, "\n\tModel set $newsetid is not significantly better than $modelsettouseid so it will not be carried forward.")
             close(io)
         end
 
@@ -639,9 +675,9 @@ function runtrainingcycles(trainer::AITrainer, initialmodelset::Int, number::Rea
 end
 
 "Run multiple training cycles starting with some newly defined models."
-function runtrainingcycles(trainer::AITrainer, newmodels::Dict{String, T}, number::Real) where {T <: Any}
-    modelset = addnewmodels(trainer, newmodels)
-    modelsetid = Int64(idofmodelset(trainer, modelset))
+function runtrainingcycles(trainer::AITrainer, newmodels::Array, number::Real)
+    modelids = addnewmodels(trainer, newmodels)
+    modelsetid = createmodelset(trainer, modelids)
     runtrainingcycles(trainer, modelsetid, number)
 end
 
@@ -672,8 +708,8 @@ function readparamjson(path::String)
     end
 end
 
-"Return the parsed contents of a json file."
-function readjson(path::String)
+"Return the parsed contents of a json file containining the size of the model inputs."
+function readinputsizejson(path::String)
     open(path, "r") do f
         return JSON.parse(String(read(f)))
     end
@@ -681,5 +717,21 @@ end
 
 
 struct WrongPhase <: Exception
+    var::String
+end
+
+struct InvalidID <:Exception
+    var::String
+end
+
+struct InvalidPhase <:Exception
+    var::String
+end
+
+struct RepeatedPhase <:Exception
+    var::String
+end
+
+struct MissingPhase <:Exception
     var::String
 end
