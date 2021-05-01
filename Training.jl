@@ -29,7 +29,7 @@ AITrainer(path) = AITrainer(
     )
 
 "Create (if not existing) the folders/sql database to store training information in. Store the Type of Player to use and the starting state for games."
-function setupnewtrainer(path::String, playertype::DataType, startstate::GameState, modelinputsizes::Dict{String, A}=Dict()) where{A<:Tuple}
+function setupnewtrainer(path::String, playertype::DataType, startstate::GameState; modelinputsizes::Dict=Dict())
     mkpath(joinpath(path, "models"))
     mkpath(joinpath(path, "training-data"))
     db = SQLite.DB(joinpath(path, "info.sqlite"))
@@ -237,6 +237,22 @@ function generatetrainingdata(trainer::AITrainer, modelsetid::Int; number::Int=1
     DBInterface.execute(trainer.db, stmt, [modelsetid, Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), time()-starttime, number, c_puct, lookaheads, temperature])
 end
 
+"Generate training data and save it."
+function generatetrainingdata(trainer::AITrainer, models::Dict; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
+    modelsetid = 1 # This is just a placeholder during debugging
+    headnode = newnode(models, deepcopy(trainer.startstate); inputreshape=trainer.modelinputsizes)
+    player = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
+    newid = columnmax(trainer.db, "TrainingData", "dataid", 0) + 1
+    starttime = time()
+    io = open(joinpath(trainer.path, "errorlog.txt"), "a+")
+    logger = SimpleLogger(io)
+    playtraininggames(player, number, joinpath(trainer.path, "training-data", "data$newid.hdf5"); logger)
+    flush(io)
+    close(io)
+    stmt = "INSERT INTO TrainingData (modelsused, creationdate, creationtime, numberofgames, cpuct, lookaheads, temperature) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    DBInterface.execute(trainer.db, stmt, [modelsetid, Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), time()-starttime, number, c_puct, lookaheads, temperature])
+end
+
 "Load and return a set of models. The keys of `model` are the names of game phases. The values are modelids of the models.
 This will check that the phase of the loaded model matches the phase stated in `models`.
 "
@@ -280,9 +296,12 @@ function loadtrainingdata(trainer::AITrainer, datasetids::Union{Array, Int})
     return alldata
 end
 
-function jointloss(yhat, y)
-    yhat = yhat[1]
-    return Flux.Losses.mse(yhat[1], y[[1], :]) + Flux.Losses.crossentropy(yhat[2], y[2:end, :])
+function maketotalloss(model)
+    function totalloss(x, y)
+        yhat = model(x)
+        return (Flux.Losses.mse(yhat[1], y[1]) + Flux.Losses.crossentropy(yhat[2:end], y[2:end]))/size(x)[end]
+    end
+    return totalloss
 end
 
 "Train new ModelSets.
@@ -297,8 +316,8 @@ end
 - `savefrequency::Int`: How frequently models should be saved during training. 1 causes models to be saved each epoch. 2 causes them to be stored
     every other epoch. The model with the best performance on the test set is always saved. 0 causes no models (except the best performing) to be saved.
 "
-function trainmodelsets(trainer::AITrainer, startingmodelsetid::Int; numberofdatasets::Int, learningrate::Real,
-                         momentum::Real, numberofepochs::Int, trainingfraction::Real=0.8, savefrequency::Real=Inf)
+function trainmodelsets(trainer::AITrainer, startingmodelsetid::Int; numberofdatasets::Int=10, learningrate::Real=1,
+                         momentum::Real=1, numberofepochs::Int=10, trainingfraction::Real=0.8, savefrequency::Real=Inf)
     DBInterface.execute(trainer.db, "SAVEPOINT trainingstart")
     modelsetid = startingmodelsetid
     savedmodelpaths = Array{String, 1}()
@@ -322,27 +341,20 @@ function trainmodelsets(trainer::AITrainer, startingmodelsetid::Int; numberofdat
             print("\nTraining $gamephase Model\n")
             model = modelset[gamephase]
             modeldata = data[gamephase]
-            try
+            if haskey(trainer.modelinputsizes, gamephase)
                 modeldata["x"] = reshape(modeldata["x"], trainer.modelinputsizes[gamephase]..., :)
-            catch e
-                if !isa(e, KeyError)
-                    rethrow(e)
-                end
             end
-            training_data, test_data = splitdata((modeldata["x"], modeldata["winprob"], modeldata["moveprob"]), trainingfraction)
-            data = Flux.Data.DataLoader(training_data..., batchsize=size(training_data[1])[2])
-            function totalloss(x, y1, y2)
-                yhat = model(x)[1]
-                return Flux.Losses.mse(yhat[1], y1) + Flux.Losses.crossentropy(yhat[2], y2) + sum(Flux.norm, params(model))
-            end
-            
+            training_data, test_data = splitdata((modeldata["x"], modeldata["y"]), trainingfraction)
+            data = Flux.Data.DataLoader(tuple(training_data...), batchsize=size(training_data[1])[end])
+
             bestmodel_results = [sessionid, 0, gamephase, 0, Inf, Inf]
             bestmodel = model
             for i in 1:numberofepochs
+                lossfunction = maketotalloss(model)
                 modelstarttime = time()
-                Flux.train!(totalloss, params(model), data, Momentum(learningrate, momentum))
-                trainingloss = totalloss(training_data...)
-                testloss = totalloss(test_data...)
+                Flux.train!(lossfunction, params(model), data, Momentum(learningrate, momentum))
+                trainingloss = lossfunction(training_data...)
+                testloss = lossfunction(test_data...)
                 
                 fe = FormatExpr("\tEpoch {}/{} - Training loss: {:.3f}, Test loss: {:.3f}\r")
                 print(format(fe, i, numberofepochs, trainingloss, testloss))
@@ -400,6 +412,17 @@ function splitdata(data, training_fraction)
     return training, test
 end
 
+function modelsetloss(trainer::AITrainer, modelsetid::Int, dataids)
+    modelset = loadmodelset(trainer, modelsetid)
+    data = loadtrainingdata(trainer, dataids)
+    for gamephase in keys(modelset)
+        phasemodel = modelset[gamephase]
+        phasedata = data[gamephase]
+        loss = maketotalloss(phasemodel)(phasedata["x"], phasedata["y"])
+        println("$gamephase: $loss")
+    end
+end
+
 "Return a slice of an array "
 function slicealonglastaxis(A::AbstractArray, inds)
     return A[Tuple(axes(A, n) for n in 1:(ndims(A)- 1))..., inds]
@@ -446,7 +469,7 @@ function runtestgames(trainer::AITrainer, playersmodelsets::Array{Int, 1}; numbe
     for modelsetid in playersmodelsets
         models = loadmodelset(trainer, modelsetid)
         headnode = newnode(models, deepcopy(trainer.startstate))
-        newplayer = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
+        newplayer = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
         push!(players, newplayer)
     end
     
@@ -520,18 +543,16 @@ end
 "Play a series of games and save the data they generate for training in the future."
 function playtraininggames(player::Player, number::Int, storepath::String; logger::Union{Nothing, AbstractLogger}=nothing)
     x = Dict{String, Array}()
-    y_winprob = Dict{String, Array}()
-    y_moveprob = Dict{String, Array}()
+    y = Dict{String, Array}()
     print("\nPlaying Training Games\n")
     for i in 1:number
         print("\t$i/$number\r")
         newplayer = deepcopy(player)
         try
             winner, newplayer = playtraininggame(newplayer)
-            newx, newy_winprob, newy_moveprob = treetrainingdata(newplayer.headnode, player.temperature)
+            newx, newy = treetrainingdata(newplayer.headnode, player.temperature)
             dictionaryappend!(x, newx)
-            dictionaryappend!(y_winprob, newy_winprob)
-            dictionaryappend!(y_moveprob, newy_moveprob)
+            dictionaryappend!(y, newy)
         catch e
             print("Failed.\r")
             if logger !== nothing
@@ -545,8 +566,7 @@ function playtraininggames(player::Player, number::Int, storepath::String; logge
         for phasename in keys(x)
             g = create_group(fid, phasename)
             g["x"] = x[phasename]
-            g["winprob"] = y_winprob[phasename]
-            g["moveprob"] = y_moveprob[phasename]
+            g["y"] = y[phasename]
         end
     end
 end
@@ -568,19 +588,17 @@ function treetrainingdata(finalnode::SearchNode, temperature::Real)
     winner = winnerof(finalnode.gamestate)
     finalnode = finalnode.parent
     x = Dict{String, AbstractArray}()
-    y_winprob = Dict{String, AbstractArray}()
-    y_moveprob = Dict{String, AbstractArray}()
+    y = Dict{String, AbstractArray}()
     while true
         if finalnode === nothing
             break
         end
-        newx, newy_winprob, newy_moveprob = nodetrainingdata(finalnode, winner, temperature)
+        newx, newy = nodetrainingdata(finalnode, winner, temperature)
         dictionaryappend!(x, newx)
-        dictionaryappend!(y_winprob, newy_winprob)
-        dictionaryappend!(y_moveprob, newy_moveprob)
+        dictionaryappend!(y, newy)
         finalnode = finalnode.parent
     end
-    return x, y_winprob, y_moveprob
+    return x, y
 end
 
 function nodetrainingdata(node::SearchNode, winner::Int, temperature::Real)
@@ -592,10 +610,8 @@ function nodetrainingdata(node::SearchNode, winner::Int, temperature::Real)
     else
         winprob = 1
     end
-    y_winprob = Dict(node.gamestate.phase => reshape([winprob], 1, 1))
-    moveprobs = moveprobabilities(node, temperature)
-    y_moveprob = Dict(node.gamestate.phase => reshape(moveprobs, length(moveprobs), 1))
-    return x, y_winprob, y_moveprob
+    y = Dict(node.gamestate.phase => convert(Array{Float32, 2}, reshape(vcat(winprob, moveprobabilities(node, temperature)), :, 1)))
+    return x, y
 end
 
 """
@@ -619,6 +635,8 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     generatetrainingdata(trainer, initialmodelsetid; trainer.defaults["generatetrainingdata"]...)
     fe = FormatExpr("\n\tGenerated training data from modelset {}. [{:.2f} minutes]")
     write(io, format(fe, initialmodelsetid, (time()-start)/60))
+
+    println("generation done")
     
     # Train the models
     start = time()
@@ -630,6 +648,8 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     end
     write(io, format(fe, join(values(initialmodelset), ", ", ", and "), (time()-start)/60))
 
+    println("training done")
+
     # Identify the best new models
     newmodelset = bestmodels(trainer, sessionid=sessionid)
     newmodelsetid = createmodelset(trainer, collect(values(newmodelset)))
@@ -639,6 +659,8 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
         fe = FormatExpr("\n\tThe best new models were {}. They are part of modelset {}")
     end
     write(io, format(fe, join(values(newmodelset), ", ", ", and "), newmodelsetid))
+
+    println("best model identified")
 
     # Play test games between the old and new model set
     start = time()
