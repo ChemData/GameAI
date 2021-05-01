@@ -5,3 +5,8 @@ How do you deal with unknown or partially known information?
 
     Perhaps a function which takes in a GameState and player number and returns only the information that player knows.
 
+
+Code issues
+    - There is an issue with Zygote (part of Flux) when I try to add an L2 regularization term to the loss function. This term requires summing over the models parameters. For some reason I get the error "Mutating arrays is not supported". This didn't happen with an older verion of Julia/Flux. No clue what the problem is.
+
+

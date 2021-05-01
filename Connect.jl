@@ -233,21 +233,28 @@ function decisioninput(gamestate::C4Game)
     my_spots = (x-> x==gamestate.current_player).(board)
     opponent_spots = (x-> x!=gamestate.current_player && x!=0).(board)
     output = cat(my_spots, opponent_spots, dims=3)
-    return convert(Array{Int}, reshape(output, (size(output)..., 1)))
+    return convert(Array{Float32}, reshape(output, (size(output)..., 1)))
 end
 
 function newmodel(hiddenlayersize::Int)
     model = Chain(
         Dense(84, hiddenlayersize),
-        Split(
-            Dense(hiddenlayersize, 1, NNlib.σ),
-            Chain(
-                Dense(hiddenlayersize, 7),
-                softmax
-            )
-        )
+        Dense(hiddenlayersize, 8),
+        finalnormalize
     )
     return model, (84,)
+end
+
+function convolutionalmodel(hiddenlayersize::Int)
+    model = Chain(
+        Conv((3, 3), 2=>8, relu),
+        Conv((3, 3), 8=>16, relu),
+        make1D,
+        Dense(96, hiddenlayersize),
+        Dense(hiddenlayersize, 8),
+        finalnormalize
+    )
+    return model
 end
 
 function naivemodel(numcolumns::Int)
@@ -255,7 +262,7 @@ function naivemodel(numcolumns::Int)
         output = ones(Float64, 1, numcolumns+1)
         output[:, 1] *= 0.5
         output[:, 2:end] *= 1/numcolumns
-        return ([[0.5], ones(Float64, numcolumns)/numcolumns],)
+        return vcat([0.5], ones(Float64, numcolumns)/numcolumns)
     end
     return modelfunc
 end
