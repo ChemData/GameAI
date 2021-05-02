@@ -703,7 +703,6 @@ function runtrainingcycles(trainer::AITrainer, newmodels::Array, number::Real)
     runtrainingcycles(trainer, modelsetid, number)
 end
 
-
 "Appends the arrays in one dictionary to the end of those in another.
 
 The arrays of any keys found in appendfrom not in appendto are simply added to the dictionary.
@@ -735,6 +734,41 @@ function readinputsizejson(path::String)
     open(path, "r") do f
         return JSON.parse(String(read(f)))
     end
+end
+
+"Play a tournmanet between multiple AIs and return their final Elo scores."
+function playtournament(ais::Array{P}, startstate::GameState, numberofgames::Int; k::Float64=20.) where {P<:Player}
+    numbers = Array(1:length(ais))
+    output = DataFrame(elo=1000., games=repeat([0], length(ais)))
+    for i in 1:numberofgames
+        shuffle!(numbers)
+        result = playtestgame(deepcopy(startstate), [deepcopy(ais[numbers[1]]), deepcopy(ais[numbers[2]])])
+        output[numbers[1], "games"] += 1
+        output[numbers[2], "games"] += 1
+        elodiff = output[numbers[1], "elo"] - output[numbers[2], "elo"]
+        if result == 1
+            output[numbers[1], "elo"] += k * (1/(1 + exp(elodiff/400)))
+            output[numbers[2], "elo"] -= k * (1/(1 + exp(elodiff/400)))
+        else
+            output[numbers[1], "elo"] -= k * (1/(1 + exp(-elodiff/400)))
+            output[numbers[2], "elo"] += k * (1/(1 + exp(-elodiff/400)))
+        end
+    end
+    return output
+end
+
+"Play a tournament between multiple AIs and return their final Elo scores."
+function playtournament(trainer::AITrainer, modelsetids::Array{Int}, numberofgames::Int; k::Float64=20., c_puct::Float64=1.0, lookaheads::Int=150, temperature::Float64=1.0)
+    ais = Array{trainer.playertype, 1}()
+    for modelsetid in modelsetids
+        modelset = loadmodelset(trainer, modelsetid)
+        headnode = newnode(modelset, deepcopy(trainer.startstate))
+        newplayer = trainer.playertype(modelset, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
+        push!(ais, newplayer)
+    end
+    results = playtournament(ais, trainer.startstate, numberofgames; k=k)
+    results[!, "modelsetid"] = modelsetids
+    return results
 end
 
 
