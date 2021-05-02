@@ -7,3 +7,4 @@
 *.json
 playground*.jl
 todo
+RunGame.jl
