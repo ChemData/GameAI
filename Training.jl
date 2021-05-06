@@ -224,8 +224,8 @@ end
 "Generate training data and save it."
 function generatetrainingdata(trainer::AITrainer, modelsetid::Int; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
     models = loadmodelset(trainer, modelsetid)
-    headnode = newnode(models, deepcopy(trainer.startstate); inputreshape=trainer.modelinputsizes)
-    player = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
+    headnode = newnode(models, deepcopy(trainer.startstate))
+    player = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
     newid = columnmax(trainer.db, "TrainingData", "dataid", 0) + 1
     starttime = time()
     io = open(joinpath(trainer.path, "errorlog.txt"), "a+")
@@ -238,10 +238,10 @@ function generatetrainingdata(trainer::AITrainer, modelsetid::Int; number::Int=1
 end
 
 "Generate training data and save it."
-function generatetrainingdata(trainer::AITrainer, models::Dict; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
+function generatetrainingdata(trainer::AITrainer, models::Modelset; number::Int=100, c_puct::Real=1, lookaheads::Int=100, temperature::Real=1)
     modelsetid = 1 # This is just a placeholder during debugging
-    headnode = newnode(models, deepcopy(trainer.startstate); inputreshape=trainer.modelinputsizes)
-    player = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
+    headnode = newnode(models, deepcopy(trainer.startstate))
+    player = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
     newid = columnmax(trainer.db, "TrainingData", "dataid", 0) + 1
     starttime = time()
     io = open(joinpath(trainer.path, "errorlog.txt"), "a+")
@@ -257,7 +257,7 @@ end
 This will check that the phase of the loaded model matches the phase stated in `models`.
 "
 function loadmodelset(trainer::AITrainer, modelset::Dict{String, Int})
-    output = Dict()
+    models = Dict()
     for phase in keys(modelset)
         modelid = modelset[phase]
         @load joinpath(trainer.path, "models", "$modelid.bson") model
@@ -265,9 +265,9 @@ function loadmodelset(trainer::AITrainer, modelset::Dict{String, Int})
         if storedphase != phase
             throw(WrongPhase("the phase of model $modelid is $storedphase but the input says it is $phase."))
         end
-        output[phase] = model
+        models[phase] = model
     end
-    return output
+    return Modelset(models, trainer.modelinputsizes)
 end
 
 function loadmodelset(trainer::AITrainer, modelsetid::Int)
@@ -341,9 +341,7 @@ function trainmodelsets(trainer::AITrainer, startingmodelsetid::Int; numberofdat
             print("\nTraining $gamephase Model\n")
             model = modelset[gamephase]
             modeldata = data[gamephase]
-            if haskey(trainer.modelinputsizes, gamephase)
-                modeldata["x"] = reshape(modeldata["x"], trainer.modelinputsizes[gamephase]..., :)
-            end
+            modeldata["x"] = reshape(modelset, gamephase, modeldata["x"])
             training_data, test_data = splitdata((modeldata["x"], modeldata["y"]), trainingfraction)
             data = Flux.Data.DataLoader(tuple(training_data...), batchsize=size(training_data[1])[end])
 
@@ -469,7 +467,7 @@ function runtestgames(trainer::AITrainer, playersmodelsets::Array{Int, 1}; numbe
     for modelsetid in playersmodelsets
         models = loadmodelset(trainer, modelsetid)
         headnode = newnode(models, deepcopy(trainer.startstate))
-        newplayer = trainer.playertype(models, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
+        newplayer = trainer.playertype(models, headnode, c_puct, lookaheads, temperature)
         push!(players, newplayer)
     end
     
@@ -574,7 +572,7 @@ end
 "Play a traininggame in which a single AI takes all the moves."
 function playtraininggame(player::Player)
     while true
-        explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models, player.inputshapes)
+        explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models)
         _, moveindex = bestmove(player.headnode, player.temperature)
         player.headnode = takemoveandcleantree!(player.headnode, moveindex, resethead=false)
         winner = winnerof(player.headnode.gamestate)
@@ -636,7 +634,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     fe = FormatExpr("\n\tGenerated training data from modelset {}. [{:.2f} minutes]")
     write(io, format(fe, initialmodelsetid, (time()-start)/60))
 
-    println("generation done")
+    println("Generation done")
     
     # Train the models
     start = time()
@@ -648,7 +646,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     end
     write(io, format(fe, join(values(initialmodelset), ", ", ", and "), (time()-start)/60))
 
-    println("training done")
+    println("Training done")
 
     # Identify the best new models
     newmodelset = bestmodels(trainer, sessionid=sessionid)
@@ -660,7 +658,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     end
     write(io, format(fe, join(values(newmodelset), ", ", ", and "), newmodelsetid))
 
-    println("best model identified")
+    println("Best model identified")
 
     # Play test games between the old and new model set
     start = time()
@@ -671,7 +669,7 @@ function runtrainingcycle(trainer::AITrainer, initialmodelsetid::Int)
     write(io, format(fe, newmodelsetid, wins, initialmodelsetid, ties, (time()-start)/60))
 
     close(io)
-    return newmodelsetid, Dict("wins"=>result[1], "loses"=>result["total"]-result[0]-result[1])
+    return newmodelsetid, Dict("wins"=>result[1], "loses"=>result["total"]-result[0]-result[1], "ties"=>result[0])
 end
 
 "Run multiple training cycles."
@@ -681,7 +679,7 @@ function runtrainingcycles(trainer::AITrainer, initialmodelsetid::Int, number::R
     modelsettouseid = initialmodelsetid
     while completed < number
         newsetid, trainingresults = runtrainingcycle(trainer, modelsettouseid)
-        if trainingresults["wins"] >= 1.1*trainingresults["loses"]
+        if trainingresults["wins"] + 0.5*trainingresults["ties"] >= 1.1*(trainingresults["loses"] + trainingresults["ties"])
             modelsettouseid = newsetid
         else
             io = open(joinpath(trainer.path, "trainingcycleoutput.txt"), "a")
@@ -732,8 +730,21 @@ end
 "Return the parsed contents of a json file containining the size of the model inputs."
 function readinputsizejson(path::String)
     open(path, "r") do f
-        return JSON.parse(String(read(f)))
+        parsed = JSON.parse(String(read(f)))
+        return Dict([(x, tuple(parsed[x]...)) for x in keys(parsed)])
     end
+end
+
+"Load a selection of modelsets and create AIs for each of them."
+function createais(trainer::AITrainer, modelsetids::Array{Int}; c_puct::Float64=1.0, lookaheads::Int=150, temperature::Float64=1.0)
+    ais = Array{trainer.playertype, 1}()
+    for modelsetid in modelsetids
+        modelset = loadmodelset(trainer, modelsetid)
+        headnode = newnode(modelset, deepcopy(trainer.startstate))
+        newplayer = trainer.playertype(modelset, headnode, c_puct, lookaheads, temperature)
+        push!(ais, newplayer)
+    end
+    return ais
 end
 
 "Play a tournmanet between multiple AIs and return their final Elo scores."
@@ -749,7 +760,7 @@ function playtournament(ais::Array{P}, startstate::GameState, numberofgames::Int
         if result == 1
             output[numbers[1], "elo"] += k * (1/(1 + exp(elodiff/400)))
             output[numbers[2], "elo"] -= k * (1/(1 + exp(elodiff/400)))
-        else
+        elseif result == 2
             output[numbers[1], "elo"] -= k * (1/(1 + exp(-elodiff/400)))
             output[numbers[2], "elo"] += k * (1/(1 + exp(-elodiff/400)))
         end
@@ -759,16 +770,16 @@ end
 
 "Play a tournament between multiple AIs and return their final Elo scores."
 function playtournament(trainer::AITrainer, modelsetids::Array{Int}, numberofgames::Int; k::Float64=20., c_puct::Float64=1.0, lookaheads::Int=150, temperature::Float64=1.0)
-    ais = Array{trainer.playertype, 1}()
-    for modelsetid in modelsetids
-        modelset = loadmodelset(trainer, modelsetid)
-        headnode = newnode(modelset, deepcopy(trainer.startstate))
-        newplayer = trainer.playertype(modelset, trainer.modelinputsizes, headnode, c_puct, lookaheads, temperature)
-        push!(ais, newplayer)
-    end
+    ais = createais(trainer, modelsetids,; c_puct=c_puct, lookaheads=lookaheads, temperature=temperature)
     results = playtournament(ais, trainer.startstate, numberofgames; k=k)
     results[!, "modelsetid"] = modelsetids
     return results
+end
+
+"Return an array of modelsetids that were used as the starting point for model training. These are typically the modelsets that outperformed previous modelsets."
+function startingmodelsetids(trainer::AITrainer)
+    data = DataFrame(DBInterface.execute(trainer.db, "SELECT DISTINCT startingmodels FROM TrainingSessions"))
+    return data[!, "startingmodels"]
 end
 
 

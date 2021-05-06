@@ -29,8 +29,7 @@ struct C4Human <: Player
 end
 
  mutable struct C4NN <: Player
-    models::Dict{String, Union{Chain, Function}}
-    inputshapes::Dict{String, Tuple{Vararg{Int32, N} where N}}
+    models::Modelset
     headnode::SearchNode
     c_puct::Float64
     lookaheads::Int
@@ -69,7 +68,7 @@ end
 
 "Have a Neural Network AI select a move."
 function pickmove(gamestate::C4Game, player::C4NN)
-    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models, player.inputshapes)
+    explorefrom(player.headnode, player.c_puct, player.lookaheads, player.models)
     return bestmove(player.headnode, player.temperature)
 end
 

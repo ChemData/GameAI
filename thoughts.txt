@@ -10,3 +10,5 @@ Code issues
     - There is an issue with Zygote (part of Flux) when I try to add an L2 regularization term to the loss function. This term requires summing over the models parameters. For some reason I get the error "Mutating arrays is not supported". This didn't happen with an older verion of Julia/Flux. No clue what the problem is.
 
 
+- Should only a limited number of datasets be stored? This would limit the amount of space needed
+- Generated data can be used to jump start the trained process for new models. How should this be transferd? How is it stored in the database?
