@@ -1,4 +1,3 @@
-
 abstract type Player end
 abstract type GameState end
 abstract type GameOptions end
@@ -26,16 +25,36 @@ mutable struct SearchNode
     winner::Int
 end
 
+struct Modelset
+    models::Dict
+    inputsizes::Dict
+end
+
+Base.keys(m::Modelset) = return keys(m.models)
+
+Base.getindex(m::Modelset, index) = return m.models[index]
+
+function (m::Modelset)(phase::String, x::AbstractArray)
+    return m.models[phase](reshape(m, phase, x))
+end
+
+function Base.reshape(m::Modelset, phase::String, x::AbstractArray)
+    if ! haskey(m.inputsizes, phase)
+        return x
+    elseif size(x)[begin:end-1] != m.inputsizes[phase]
+        return reshape(x, m.inputsizes[phase]..., :)
+    else
+        return x
+    end
+end
+
 function Base.show(io::IO, node::SearchNode)
     print(io, "SearchNode($(node.N))")
 end
 
-function newnode(policymodels::Dict, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing, inputreshape::Dict=Dict())
+function newnode(policymodels::Modelset, gamestate::GameState; parent::Union{SearchNode, Nothing}=nothing, positionindex::Union{Int, Nothing}=nothing)
     inputdata = decisioninput(gamestate)
-    if haskey(inputreshape, gamestate.phase)
-        inputdata = reshape(inputdata, inputreshape[gamestate.phase]..., :)
-    end
-    prediction = policymodels[gamestate.phase](inputdata)
+    prediction = policymodels(gamestate.phase, inputdata)
     ν = prediction[1]
     ps = prediction[2:end]
     moves, legalmoves = listofmoves(gamestate)
@@ -77,7 +96,7 @@ function explorationvalues(from::SearchNode, c_puct::Real)
 end
 
 "Explore to a leaf node from a given node."
-function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::Dict, inputreshape::Dict=Dict())
+function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::Modelset)
     for i in 1:number
         currentnode = from
         while true
@@ -89,7 +108,7 @@ function explorefrom(from::SearchNode, c_puct::Real, number::Int, policymodels::
             index = findmax(explorationvalues(currentnode, c_puct))[2]
             if typeof(currentnode.children[index]) == Nothing
                 gamestate = executemove(currentnode.gamestate, currentnode.moves[index])
-                child = newnode(policymodels, gamestate; parent=currentnode, positionindex=index, inputreshape=inputreshape)
+                child = newnode(policymodels, gamestate; parent=currentnode, positionindex=index)
                 currentnode.children[index] = child
                 backup(child, child.ν, child.gamestate.current_player)
                 break
@@ -143,7 +162,7 @@ end
 "Take a specific move and then return the new head node.
 Keeps all the children nodes of the new head but discards the rest of the tree.
 If the new head was not a child of the previous head, will create a completely new node."
-function takemoveandcleantree!(from::SearchNode, moveindex::Int; newgamestate::Union{GameState, Nothing}=nothing, policymodels::Union{Dict, Nothing}=nothing, resethead::Bool=false)
+function takemoveandcleantree!(from::SearchNode, moveindex::Int; newgamestate::Union{GameState, Nothing}=nothing, policymodels::Union{Modelset, Nothing}=nothing, resethead::Bool=false)
     if from.children[moveindex] === nothing
         if (newgamestate === nothing) & (policymodels === nothing)
             throw(MissingChild("That move cannot be taken because the child does not exist. If you provide the new gamestate and policymodel, this would be OK."))
